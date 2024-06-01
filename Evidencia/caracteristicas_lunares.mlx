@@ -1,0 +1,107 @@
+clc;
+clearvars;
+close all;
+
+dataFolders = {'melanoma', 'nevus', 'seborrheic_keratosis'};
+basePath = 'C:\Users\jnjsr\Downloads\archive\skin-lesions\train';
+resultsFile = fullfile(basePath, 'full_features.xlsx');
+
+colNames = {'ImageName', 'Area', 'Centroid_X', 'Centroid_Y', 'Eccentricity', 'MajorAxisLength', ...
+'MinorAxisLength', 'Orientation', 'Perimeter', 'Solidity', 'MaxIntensity', 'MinIntensity', ...
+'MeanIntensity', 'MedianIntensity', 'RangeIntensity', 'StandardDeviation', 'Skewness', ...
+'Kurtosis', 'Energy', 'Entropy', 'Contrast', 'Correlation', 'Homogeneity', 'ASM', ...
+'Extent', 'FillingRatio', 'Convexity', 'Compactness', 'EulerNumber', 'EquivDiameter', ...
+'SolidityRatio', 'MajorMinorAxisRatio', 'Class', 'FractalDimension'};
+
+combinedFeatures = {};
+
+for folderIdx = 1:length(dataFolders)
+    currentDir = fullfile(basePath, dataFolders{folderIdx});
+    fileList = dir(fullfile(currentDir, '*.jpg'));
+    numFiles = length(fileList);
+    
+    disp(['Procesando imágenes de la carpeta "', dataFolders{folderIdx}, '"...']);
+    
+    for imgIdx = 1:numFiles
+        imgPath = fullfile(currentDir, fileList(imgIdx).name);
+        origImg = imread(imgPath);
+        smoothImg = imgaussfilt(origImg, 5);
+        resizeImg = imresize(smoothImg, [512, 512]);
+        roi = [32, 32, size(resizeImg, 2) - 64, 447];
+        cropImg = imcrop(resizeImg, roi);
+        grayImg = rgb2gray(cropImg);
+        bwThreshold = graythresh(grayImg);
+        binaryImg = imbinarize(grayImg, bwThreshold);
+        binaryImg = imcomplement(binaryImg);
+        structElem = strel('disk', 3);
+        cleanMask = imclose(imopen(binaryImg, structElem), structElem);
+        properties = regionprops(cleanMask, grayImg, 'Area', 'Centroid', 'Eccentricity', ...
+        'MajorAxisLength', 'MinorAxisLength', 'Orientation', 'Perimeter', 'Solidity', 'PixelValues', ...
+        'Extent', 'EulerNumber', 'EquivDiameter', 'FilledImage', 'ConvexArea');
+        
+        if isempty(properties)
+            continue;
+        end
+        
+        [~, maxIdx] = max([properties.Area]);
+        selectedProps = properties(maxIdx);
+        pixelVals = double(grayImg(cleanMask));
+        
+        % Calcular GLCM y Haralick features
+        grayMatrix = graycomatrix(pixelVals, 'Offset', [1 0], 'Symmetric', true, 'NumLevels', 32, 'GrayLimits', [min(pixelVals) max(pixelVals)]);
+        glcmStats = graycoprops(grayMatrix);
+        glcmEnergy = glcmStats.Energy;
+        glcmContrast = glcmStats.Contrast;
+        glcmCorrelation = glcmStats.Correlation;
+        glcmHomogeneity = glcmStats.Homogeneity;
+        asmValue = sum(grayMatrix(:).^2);
+        entropyCalc = -sum(histcounts(pixelVals, 'Normalization', 'probability').*log2(histcounts(pixelVals, 'Normalization', 'probability')+eps));
+        
+        % Calcular la dimensión fractal usando el método de box-counting
+        fractalDimension = boxcount(binaryImg);
+        
+        rowFeatures = {fileList(imgIdx).name, selectedProps.Area, selectedProps.Centroid(1), selectedProps.Centroid(2), selectedProps.Eccentricity, ...
+        selectedProps.MajorAxisLength, selectedProps.MinorAxisLength, selectedProps.Orientation, selectedProps.Perimeter, selectedProps.Solidity, ...
+        max(pixelVals), min(pixelVals), mean(pixelVals), median(pixelVals), range(pixelVals), std(pixelVals), skewness(pixelVals), kurtosis(pixelVals), ...
+        glcmEnergy, entropyCalc, glcmContrast, glcmCorrelation, glcmHomogeneity, asmValue, ...
+        selectedProps.Extent, bwarea(selectedProps.FilledImage) / selectedProps.Area, selectedProps.ConvexArea / selectedProps.Area, ...
+        4*pi*selectedProps.Area / (selectedProps.Perimeter^2), selectedProps.EulerNumber, selectedProps.EquivDiameter, ...
+        selectedProps.Area / bwarea(selectedProps.FilledImage), selectedProps.MajorAxisLength / selectedProps.MinorAxisLength, ...
+        dataFolders{folderIdx}, fractalDimension};
+        
+        rowFeatures = num2cell(rowFeatures);
+        combinedFeatures = [combinedFeatures; rowFeatures];
+        
+        disp(['Procesada imagen: ', fileList(imgIdx).name]);
+    end
+end
+
+% Verifica que el número de nombres de variables coincida con el número de columnas en tus datos
+if numel(colNames) ~= size(combinedFeatures, 2)
+    error('El número de nombres de variables no coincide con el número de columnas en los datos.');
+end
+
+% Crea la tabla con los nombres de variables correctos
+featuresTable = cell2table(combinedFeatures, 'VariableNames', colNames);
+writetable(featuresTable, resultsFile);
+
+function D = boxcount(BW)
+    % Calcula la dimensión fractal usando el método de box-counting
+    % Entrada:
+    %   BW - Imagen binaria
+    % Salida:
+    %   D - Dimensión fractal
+
+    [m, n] = size(BW);
+    r = min(m, n);
+    r = floor(log2(r)); % Máximo número de divisiones posibles
+    N = zeros(r, 1);
+    for k = 1:r
+        s = 2^k;
+        E = imresize(BW, [s s]);
+        N(k) = sum(E(:));
+    end
+    scale = 2.^(1:r);
+    coeffs = polyfit(log(scale), log(N), 1);
+    D = -coeffs(1);
+end
